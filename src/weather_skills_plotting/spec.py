@@ -22,6 +22,7 @@ TRACE_KINDS = frozenset(
         "heatmap",
         "contour",
         "quiver",
+        "scatter",
         "layer",
         "timeseries",
         "xy",
@@ -30,7 +31,7 @@ TRACE_KINDS = frozenset(
         "mediogram",
     }
 )
-MAP_KINDS = frozenset({"heatmap", "contour", "quiver", "layer"})
+MAP_KINDS = frozenset({"heatmap", "contour", "quiver", "scatter", "layer"})
 
 _INDEX_INT_RE = re.compile(r"[+-]?[0-9]+")
 _NON_ZARR_SUFFIXES = {".geojson", ".json", ".shp", ".gpkg", ".kml"}
@@ -142,6 +143,7 @@ TRACE_KEYS = (
         {
             "kind",
             "input",
+            "alpha",
             "mark",
             "time_dim",
             "x",
@@ -174,9 +176,44 @@ LAYER_SCALE_KEYS = frozenset(
         "v_variable",
     }
 )
+# A layer's own opacity, without having to know which nested artist block
+# (mesh, contour, quiver, scatter) its kind actually draws with.
+LAYER_STYLE_KEYS = frozenset({"alpha"})
 LAYER_KEYS = (
-    frozenset({"id", "kind", "path", "options", "input", "raw"}) | LAYER_SCALE_KEYS | ARTIST_BLOCKS
+    frozenset({"id", "kind", "path", "options", "input", "raw"})
+    | LAYER_SCALE_KEYS
+    | LAYER_STYLE_KEYS
+    | ARTIST_BLOCKS
 )
+
+# Which nested artist block each map kind is drawn with, for lifting a flat
+# ``alpha`` (or, in future, another shared style knob) into it.
+_KIND_STYLE_BLOCK = {
+    "heatmap": "mesh",
+    "contour": "contour",
+    "quiver": "quiver",
+    "scatter": "scatter",
+    "outline": "line",
+}
+
+
+def apply_layer_alpha(options: dict, kind: str | None) -> dict:
+    """Let a flat ``alpha`` reach the nested artist block ``kind`` draws with.
+
+    ``layers[].alpha`` / ``traces[].alpha`` is the intuitive, kind-agnostic
+    spelling; the renderer only reads opacity off ``mesh``/``contour``/
+    ``quiver``/``scatter``. A block that already sets its own ``alpha``
+    wins over the flat one.
+    """
+    alpha = options.get("alpha")
+    block_name = _KIND_STYLE_BLOCK.get(str(kind or "").lower())
+    if alpha is None or block_name is None:
+        return options
+    block = dict(options.get(block_name) or {})
+    block.setdefault("alpha", alpha)
+    out = dict(options)
+    out[block_name] = block
+    return out
 BAR_MODES = frozenset({"grouped", "stacked", "overlay"})
 
 _SECTIONS = {
@@ -184,6 +221,14 @@ _SECTIONS = {
     "theme": THEME_KEYS,
     "geo": GEO_KEYS,
 }
+
+
+# Keys an agent reaches for when it has a place name instead of coordinates.
+_PLACE_NAME_KEYS = frozenset({"region", "country", "place", "name", "county", "admin"})
+# Line-style keys an agent puts flat on a layer instead of under ``line``.
+_FLAT_LINE_KEYS = frozenset(
+    {"color", "c", "edgecolor", "linewidth", "lw", "linestyle", "ls", "linecolor"}
+)
 
 
 def _check_keys(obj, allowed, loc):
@@ -194,9 +239,33 @@ def _check_keys(obj, allowed, loc):
         if key in allowed:
             continue
         where = f"{loc}.{key}" if loc else key
+        hint = ""
+        if loc == "geo" and key in _PLACE_NAME_KEYS:
+            hint = (
+                "; geo takes coordinates only — run resolve-region for a named place"
+                " and pass its bbox as geo.bbox or its polygon as geo.mask_geojson"
+            )
+        elif loc.endswith("]") and "layers[" in loc and key in _FLAT_LINE_KEYS:
+            hint = (
+                f"; line styling goes in a nested block — {loc}.line, e.g. "
+                '{"id": "b", "line": {"color": "black", "linewidth": 2.5}}'
+            )
         raise UsageError(
             f"plot spec {where} is not a known key; allowed here: {', '.join(sorted(allowed))}"
+            f"{hint}"
         )
+
+
+def _validate_mask_geojson(value) -> None:
+    """``geo.mask_geojson`` is a file path; styling an edge is an outline layer's job."""
+    if value is None or isinstance(value, str):
+        return
+    raise UsageError(
+        "plot spec geo.mask_geojson must be a GeoJSON file path string, "
+        f"not {type(value).__name__}; it only blanks cells outside the polygon. "
+        "To draw the boundary, add --layer outline:PATH and style it with "
+        'layers[].line (e.g. {"color": "black", "linewidth": 3})'
+    )
 
 
 def _validate_colorbar_dict(colorbar: dict, loc: str) -> None:
@@ -307,6 +376,11 @@ def normalize_spec(data: dict) -> dict:
         if block is None:
             continue
         _check_keys(block, allowed, section)
+    _validate_mask_geojson((data.get("geo") or {}).get("mask_geojson"))
+    if (data.get("geo") or {}).get("overlays") is not None:
+        from weather_skills_plotting.maps import overlay_choice
+
+        overlay_choice(data["geo"]["overlays"])
     facet = (data.get("layout") or {}).get("facet")
     if facet is not None:
         _lift_facet_titles(data, facet)
@@ -475,8 +549,10 @@ def _validate_artist_blocks(item: dict, loc: str) -> None:
         LINE_KEYS,
         MESH_KEYS,
         QUIVER_KEYS,
+        SCATTER_ALIASES,
         SCATTER_KEYS,
         WINDROSE_KEYS,
+        normalize_aliases,
         pick,
     )
 
@@ -501,11 +577,19 @@ def _validate_artist_blocks(item: dict, loc: str) -> None:
                 raise UsageError(f"{loc}.{name} must be an object")
             _check_keys(block, allowed, f"{loc}.{name}")
             continue
+        if name == "scatter":
+            block = normalize_aliases(block, SCATTER_ALIASES, loc=f"{loc}.{name}")
+            item[name] = block
         pick(block, allowed, loc=f"{loc}.{name}")
 
 
 def _validate_axes_annotations(data: dict) -> None:
-    from weather_skills_plotting.figure import AXES_TEMPLATE, pick
+    from weather_skills_plotting.figure import (
+        AXES_TEMPLATE,
+        check_annotation_keys,
+        check_shape_keys,
+        pick,
+    )
 
     axes = data.get("axes")
     allowed = frozenset(AXES_TEMPLATE)
@@ -528,6 +612,10 @@ def _validate_axes_annotations(data: dict) -> None:
         for i, item in enumerate(items):
             if not isinstance(item, dict):
                 raise UsageError(f"plot spec {section}[{i}] must be an object")
+            if section == "annotations":
+                check_annotation_keys(item, f"plot spec annotations[{i}]")
+            else:
+                check_shape_keys(item, f"plot spec shapes[{i}]")
 
 
 def trace_at(spec: dict | None, index: int = 0) -> dict:
@@ -884,10 +972,10 @@ def fold_layer_options(item: dict) -> dict:
     leftover ``options`` bag from an older dump.
     """
     out = dict(item.get("options") or {})
-    for key in LAYER_SCALE_KEYS | ARTIST_BLOCKS:
+    for key in LAYER_SCALE_KEYS | LAYER_STYLE_KEYS | ARTIST_BLOCKS:
         if item.get(key) is not None:
             out[key] = item[key]
-    return out
+    return apply_layer_alpha(out, item.get("kind"))
 
 
 def layer_item_from_parts(
@@ -907,7 +995,7 @@ def layer_item_from_parts(
         entry["raw"] = raw
     leftover = {}
     for key, value in opts.items():
-        if key in LAYER_SCALE_KEYS or key in ARTIST_BLOCKS:
+        if key in LAYER_SCALE_KEYS or key in LAYER_STYLE_KEYS or key in ARTIST_BLOCKS:
             entry[key] = value
         else:
             leftover[key] = value
@@ -1302,11 +1390,17 @@ SPEC_ARGUMENT_HELP = (
     "Paths listed in the spec are opened when no dataset flag is passed."
 )
 
+SPEC_HELP_HINT = (
+    "Run with --help for every spec key, with examples. To edit the spec you already "
+    "have, run the same command with --dump-spec - in place of --spec, then pass the "
+    "edited JSON back as --spec"
+)
+
 DUMP_SPEC_ARGUMENT_HELP = (
     "Dump the assembled plot spec as JSON and skip drawing a PNG. "
     "Bare --dump-spec (or '-') prints to stdout; a path writes a file. "
-    "--output is not required. Token-expensive; omit unless you need to "
-    "inspect a key before editing --spec."
+    "--output is not required. Use it to get the current spec to modify; "
+    "for what keys exist, see --help."
 )
 
 
@@ -1317,7 +1411,7 @@ def parse_plot_spec(value):
     try:
         return load_spec(value)
     except UsageError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from None
+        raise argparse.ArgumentTypeError(f"{exc}. {SPEC_HELP_HINT}") from None
 
 
 def parse_plot_patch(value):

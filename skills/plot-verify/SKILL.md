@@ -21,11 +21,11 @@ each forecast/obs pair, then pass those Zarrs here.
 Every drawing choice besides `--obs`/`--forecast`/`--verify`/`--output` is a
 JSON key under `--spec` (see **Parameters** below); an unknown or misplaced
 key is a hard error listing every valid key at that level, not a silent
-no-op. If you don't already know the shape of `--spec`, run `--dump-spec -`
-with your `--obs`/`--forecast`/`--verify` files and no `--spec` at all to
-see the whole resolved schema in one call, rather than guessing keys one at
-a time — or read the full key reference in prose at
-[`docs/plotting.md`](../../docs/plotting.md). And render once and look at
+no-op. If you don't already know the shape of `--spec`, run `--help`: after
+the flags it prints the plot spec reference (every section and key, with
+recipes), rather than guessing keys one at a time. To modify a figure you
+already drew, `--dump-spec -` with the same files prints its current spec to
+edit and pass back. And render once and look at
 the PNG (or run `inspect-figure` on it) before trying another variation —
 the `plot hash` printed after a render only tells you the pixels changed,
 never what changed or how it looks.
@@ -79,14 +79,14 @@ uv run ${CLAUDE_SKILL_DIR}/scripts/plot_verify.py \
 - `--verify` — verify Zarr for that lead, once per `--forecast`, same order.
 - `--output`, `-o` — PNG path.
 - `--spec` — JSON object or path, always deep-merged onto the spec built from the opened files. Your values win. A `patch` key inside the object is rejected.
-- `--dump-spec` — write the merged spec as JSON and skip the PNG. Bare `--dump-spec` or `-` prints to stdout. Run it with just the dataset flags and no `--spec` to see the full default schema before writing one.
+- `--dump-spec` — write the merged spec as JSON and skip the PNG. Bare `--dump-spec` or `-` prints to stdout. Use it to get the current spec to modify; for what keys exist, use `--help`.
 
 ### Parameters (`--spec`)
 
 - `inputs[]` — `variable` per input (`obs`, `forecast1`, `forecast2`, …); an input that omits it uses `inputs[0].variable` (the obs input), then auto-detects. Obs and a forecast may name the field differently (e.g. `precip` vs `precipitation_surface`) — set each one's own `variable`. `label` on obs and each forecast.
 - `title`, `theme.fontsize` (default 16), `theme.colormap`, `vmin`, `vmax`.
 - `traces[0].leads` — column titles. Default `1-week lead` … `N-week lead`. Titles that name a week are sorted so week-1 sits next to the observation.
-- `geo.bbox` as `[N, W, S, E]`, `geo.mask_geojson`.
+- `geo.bbox` as `[N, W, S, E]`, `geo.mask_geojson`. There is no `geo.region` / `geo.country` — for a named place, run `resolve-region` and pass its bbox or polygon.
 - `layout.figsize` as `[W, H]`, `layout.facet.wspace` / `hspace`.
 
 ### Output

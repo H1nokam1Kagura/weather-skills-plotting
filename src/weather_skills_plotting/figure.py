@@ -741,6 +741,36 @@ SCATTER_KEYS = frozenset(
     }
 )
 
+# matplotlib's Collection base class aliases ``edgecolor`` / ``linewidth`` to
+# their plural forms on its own — but only when a caller passes just one
+# spelling. Our default kwargs already set the plural form, so an alias left
+# unrenamed here would collide with that default (matplotlib then raises
+# "got both 'edgecolor' and 'edgecolors'"). ``s`` (marker area, in points^2)
+# has no such alias at all, matplotlib-side, so ``size`` needs the same
+# treatment. Rename all three ourselves so exactly one spelling ever reaches
+# matplotlib.
+SCATTER_ALIASES = {"size": "s", "edgecolor": "edgecolors", "linewidth": "linewidths"}
+
+
+def normalize_aliases(block: dict, aliases: dict, *, loc: str) -> dict:
+    """Rename intuitive alias keys (``size``) to what matplotlib expects (``s``).
+
+    Raises if both a key and its alias are set, rather than silently
+    preferring one.
+    """
+    if not aliases or not isinstance(block, dict):
+        return block
+    out = {}
+    sources = {}
+    for key, value in block.items():
+        canonical = aliases.get(key, key)
+        if canonical in out:
+            raise UsageError(f"{loc} sets both {sources[canonical]!r} and {key!r}; use only one")
+        out[canonical] = value
+        sources[canonical] = key
+    return out
+
+
 BAR_KEYS = frozenset(
     {
         "align",
@@ -964,8 +994,64 @@ BOX_KEYS = frozenset(
 )
 
 _ANNOTATION_META = frozenset(
-    {"text", "s", "x", "y", "xy", "xref", "axes", "panel", "transform", "showarrow"}
+    {"text", "s", "x", "y", "xy", "xref", "yref", "axes", "panel", "transform", "showarrow"}
 )
+ANNOTATION_KEYS = ANNOTATE_KEYS | _ANNOTATION_META
+
+# Spellings accepted for where an annotation's x/y are measured. Matplotlib
+# (``axes fraction``) and Plotly (``paper`` / ``x domain``) names both work.
+_ANNOTATION_COORDS = {
+    "data": "data",
+    "x": "data",
+    "y": "data",
+    "axes": "axes",
+    "axes fraction": "axes",
+    "paper": "axes",
+    "domain": "axes",
+    "x domain": "axes",
+    "y domain": "axes",
+    "figure": "figure",
+    "figure fraction": "figure",
+}
+
+
+def annotation_coords(ann: dict, loc: str = "annotations") -> str:
+    """``data``, ``axes`` (0–1 across the panel), or ``figure`` (0–1 across the figure).
+
+    Read from ``xref`` / ``yref`` / ``xycoords`` / ``transform``; they must agree.
+    Unset means data coordinates (lon/lat on a map).
+    """
+    found = {}
+    for key in ("xref", "yref", "xycoords", "transform"):
+        raw = ann.get(key)
+        if raw is None or raw == "":
+            continue
+        name = str(raw).strip().lower()
+        if name not in _ANNOTATION_COORDS:
+            raise UsageError(
+                f"{loc}.{key} {raw!r} is not a known coordinate system; use one of "
+                f"{', '.join(sorted(_ANNOTATION_COORDS))} "
+                "(axes fraction = 0–1 across the panel, figure fraction = 0–1 across the figure)"
+            )
+        found[key] = _ANNOTATION_COORDS[name]
+    systems = set(found.values())
+    if len(systems) > 1:
+        detail = ", ".join(f"{k}={ann[k]!r}" for k in found)
+        raise UsageError(
+            f"{loc} mixes coordinate systems ({detail}); x and y must use the same one"
+        )
+    return systems.pop() if systems else "data"
+
+
+def check_annotation_keys(ann: dict, loc: str = "annotations") -> None:
+    extra = sorted(k for k in ann if k not in ANNOTATION_KEYS)
+    if extra:
+        raise UsageError(
+            f"{loc} has unknown key(s) {extra}; allowed: {', '.join(sorted(ANNOTATION_KEYS))}. "
+            "Run with --help for the annotation reference"
+        )
+    annotation_coords(ann, loc)
+
 
 # Object-form axes.xlabel / axes.ylabel: text plus position knobs.
 AXIS_LABEL_META = frozenset({"text", "loc", "pad", "coords"})
@@ -1338,9 +1424,10 @@ def apply_annotation(ax, ann: dict, loc: str = "annotations") -> None:
             float(ann["x"]) if ann.get("x") is not None else 0.0,
             float(ann["y"]) if ann.get("y") is not None else 0.0,
         )
-    xref = str(ann.get("xref") or ann.get("xycoords") or "")
+    check_annotation_keys(ann, loc)
+    coords = annotation_coords(ann, loc)
     kw = {}
-    for key in ANNOTATE_KEYS:
+    for key in ANNOTATE_KEYS - {"xycoords", "transform"}:
         if key in ann:
             kw[key] = ann[key]
     if "arrowprops" in kw:
@@ -1351,33 +1438,61 @@ def apply_annotation(ax, ann: dict, loc: str = "annotations") -> None:
         kw["xytext"] = tuple(kw["xytext"]) if isinstance(kw["xytext"], list) else kw["xytext"]
     if "bbox" in kw and isinstance(kw["bbox"], dict):
         kw["bbox"] = dict(kw["bbox"])
-    transform_name = str(ann.get("transform") or "")
-    if "domain" in xref or xref in ("paper", "figure") or transform_name in ("axes", "figure"):
-        kw["transform"] = (
-            ax.transAxes
-            if transform_name != "figure" and xref != "figure"
-            else ax.figure.transFigure
-        )
-        kw.pop("xycoords", None)
-    extra = {k: v for k, v in ann.items() if k not in ANNOTATE_KEYS | _ANNOTATION_META}
-    if extra:
-        raise UsageError(f"{loc} has unknown key(s) {sorted(extra)}")
     if "arrowprops" in kw or "xytext" in kw:
-        annotate_kw = dict(kw)
-        if "xycoords" in annotate_kw:
-            annotate_kw.pop("transform", None)
-        ax.annotate(str(text), xy=xy, **annotate_kw)
+        xycoords = {"data": "data", "axes": "axes fraction", "figure": "figure fraction"}[coords]
+        ax.annotate(str(text), xy=xy, xycoords=xycoords, **kw)
     else:
+        if coords != "data":
+            kw["transform"] = ax.transAxes if coords == "axes" else ax.figure.transFigure
         text_kw = {k: v for k, v in kw.items() if k in TEXT_KEYS}
         ax.text(xy[0], xy[1], str(text), **text_kw)
+
+
+_SHAPE_META = frozenset({"type", "kind", "panel", "axes"})
+_SPAN_STYLE_KEYS = RECT_KEYS | {"color", "facecolor"}
+# Canonical type -> (aliases, geometry keys, style keys).
+SHAPE_TYPES = {
+    "rect": (("rectangle", "box"), {"x0", "x1", "y0", "y1", "xy", "width", "height"}, RECT_KEYS),
+    "hline": (("axhline",), {"y"}, LINE_KEYS),
+    "vline": (("axvline",), {"x"}, LINE_KEYS),
+    "hspan": (("axhspan",), {"ymin", "ymax"}, _SPAN_STYLE_KEYS),
+    "vspan": (("axvspan",), {"xmin", "xmax"}, _SPAN_STYLE_KEYS),
+    "line": (("segment",), {"x", "y", "x0", "x1", "y0", "y1"}, LINE_KEYS),
+    "circle": ((), {"x", "y", "xy", "radius", "width", "height"}, RECT_KEYS),
+    "ellipse": ((), {"x", "y", "xy", "width", "height"}, RECT_KEYS),
+}
+_SHAPE_ALIASES = {
+    alias: name for name, (aliases, _, _) in SHAPE_TYPES.items() for alias in (name, *aliases)
+}
+
+
+def check_shape_keys(shape: dict, loc: str = "shapes") -> str:
+    """Return the canonical shape type; unknown types and keys are errors."""
+    raw = str(shape.get("type") or shape.get("kind") or "rect").lower()
+    kind = _SHAPE_ALIASES.get(raw)
+    if kind is None:
+        raise UsageError(f"{loc}.type {raw!r} is unknown; use {', '.join(SHAPE_TYPES)}")
+    _, geometry, style = SHAPE_TYPES[kind]
+    allowed = _SHAPE_META | geometry | style
+    extra = sorted(k for k in shape if k not in allowed)
+    if extra:
+        hint = ""
+        if {"xref", "yref", "xycoords", "transform"} & set(extra):
+            hint = " Shapes are drawn in data coordinates (lon/lat on a map)."
+        raise UsageError(
+            f"{loc} ({kind}) has unknown key(s) {extra}; geometry: "
+            f"{', '.join(sorted(geometry))}; style: {', '.join(sorted(style))}.{hint} "
+            "Run with --help for the shapes reference"
+        )
+    return kind
 
 
 def apply_shape(ax, shape: dict, loc: str = "shapes") -> None:
     """Add a rect, hline/vline, span, line, or circle from JSON."""
     if not isinstance(shape, dict):
         raise UsageError(f"{loc} item must be an object")
-    kind = str(shape.get("type") or shape.get("kind") or "rect").lower()
-    if kind in ("rect", "rectangle", "box"):
+    kind = check_shape_keys(shape, loc)
+    if kind == "rect":
         from matplotlib.patches import Rectangle
 
         if "x0" in shape:
@@ -1399,19 +1514,19 @@ def apply_shape(ax, shape: dict, loc: str = "shapes") -> None:
         style.setdefault("zorder", 6)
         ax.add_patch(Rectangle(xy, w, h, **style))
         return
-    if kind in ("hline", "axhline"):
+    if kind == "hline":
         ax.axhline(
             float(shape.get("y", 0)),
             **pick({k: v for k, v in shape.items() if k in LINE_KEYS}, LINE_KEYS, loc=loc),
         )
         return
-    if kind in ("vline", "axvline"):
+    if kind == "vline":
         ax.axvline(
             float(shape.get("x", 0)),
             **pick({k: v for k, v in shape.items() if k in LINE_KEYS}, LINE_KEYS, loc=loc),
         )
         return
-    if kind in ("hspan", "axhspan"):
+    if kind == "hspan":
         ax.axhspan(
             float(shape["ymin"]),
             float(shape["ymax"]),
@@ -1426,7 +1541,7 @@ def apply_shape(ax, shape: dict, loc: str = "shapes") -> None:
             ),
         )
         return
-    if kind in ("vspan", "axvspan"):
+    if kind == "vspan":
         ax.axvspan(
             float(shape["xmin"]),
             float(shape["xmax"]),
@@ -1441,7 +1556,7 @@ def apply_shape(ax, shape: dict, loc: str = "shapes") -> None:
             ),
         )
         return
-    if kind in ("line", "segment"):
+    if kind == "line":
         x = shape.get("x") or [shape.get("x0"), shape.get("x1")]
         y = shape.get("y") or [shape.get("y0"), shape.get("y1")]
         ax.plot(
@@ -1465,9 +1580,6 @@ def apply_shape(ax, shape: dict, loc: str = "shapes") -> None:
         else:
             ax.add_patch(Circle(xy, float(shape.get("radius", 1)), **style))
         return
-    raise UsageError(
-        f"{loc}.type {kind!r} is unknown; use rect, hline, vline, hspan, vspan, line, or circle"
-    )
 
 
 def _resolve_target_axes(item: dict, visible: list, loc: str) -> list:
@@ -1650,6 +1762,7 @@ def scatter_kwargs(style: dict | None, *, loc: str = "scatter") -> dict:
     if not style:
         return {}
     raw = style.get("scatter") if isinstance(style.get("scatter"), dict) else style
+    raw = normalize_aliases(raw, SCATTER_ALIASES, loc=loc)
     return pick({k: v for k, v in raw.items() if k in SCATTER_KEYS}, SCATTER_KEYS, loc=loc)
 
 

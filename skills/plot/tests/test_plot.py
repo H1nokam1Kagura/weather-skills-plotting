@@ -20,6 +20,7 @@ from weather_skills_plotting import charts as plot_charts
 from weather_skills_plotting import figure as ws_figure
 from weather_skills_plotting import maps as plot_maps
 from weather_skills_plotting import spec as ws_spec
+from weather_skills_plotting.reference import RECIPES
 
 plot_mod = load_skill("plot", "plot")
 
@@ -800,6 +801,12 @@ def test_lakes_overlay_is_filled_grey():
     assert plot_maps.LAKE_FACECOLOR == "#708090"
 
 
+def test_rivers_overlay_is_slate_lines_under_lakes():
+    assert plot_maps.RIVERS_STYLE["facecolor"] == "none"
+    assert plot_maps.RIVERS_STYLE["edgecolor"] == plot_maps.LAKE_FACECOLOR
+    assert plot_maps.RIVERS_STYLE["zorder"] < plot_maps.LAKES_STYLE["zorder"]
+
+
 def test_load_geo_overlays_skips_on_download_failure(monkeypatch, capsys):
     import cartopy.io.shapereader as shpreader
 
@@ -1315,6 +1322,99 @@ def test_layer_heatmap_and_scatter_overlay(tmp_path, plot_fn):
     assert names == {"grid.zarr", "pts.zarr"}
 
 
+def test_kind_scatter_single_input_needs_no_layer(tmp_path, plot_fn):
+    pts = write_zarr(make_point_obs(n_time=2), tmp_path / "pts.zarr")
+    out = tmp_path / "scatter_only.png"
+    run_skill(
+        plot_fn,
+        "-i",
+        str(pts),
+        "-o",
+        str(out),
+        "--spec",
+        '{"traces":[{"kind":"scatter"}]}',
+    )
+    assert Path(out).exists()
+    assert out.stat().st_size > 0
+
+
+def test_heatmap_trace_alpha_shorthand(tmp_path, plot_fn):
+    src = write_zarr(make_gridded(fill=5.0), tmp_path / "a.zarr")
+    out = tmp_path / "alpha.png"
+    run_skill(
+        plot_fn,
+        "-i",
+        str(src),
+        "-o",
+        str(out),
+        "--spec",
+        '{"traces":[{"kind":"heatmap","alpha":0.4}]}',
+    )
+    assert Path(out).exists()
+    assert out.stat().st_size > 0
+
+
+def test_layer_scatter_style_accepts_intuitive_aliases(tmp_path, plot_fn):
+    grid = write_zarr(make_gridded(), tmp_path / "grid.zarr")
+    pts = write_zarr(make_point_obs(n_time=2), tmp_path / "pts.zarr")
+    out = tmp_path / "overlay_alias.png"
+    run_skill(
+        plot_fn,
+        "--layer",
+        f"heatmap:{grid}",
+        "--layer",
+        f"scatter:{pts}",
+        "-o",
+        str(out),
+        "--spec",
+        json.dumps(
+            {
+                "layers": [
+                    {"id": "a"},
+                    {"id": "b", "scatter": {"edgecolor": "black", "linewidth": 1.8, "size": 70}},
+                ]
+            }
+        ),
+    )
+    assert Path(out).exists()
+    assert out.stat().st_size > 0
+
+
+def test_layer_scatter_rejects_conflicting_size_and_s(tmp_path, plot_fn, capsys):
+    pts = write_zarr(make_point_obs(n_time=2), tmp_path / "pts.zarr")
+    out = tmp_path / "bad.png"
+    with pytest.raises(SystemExit):
+        run_skill(
+            plot_fn,
+            "--layer",
+            f"scatter:{pts}",
+            "-o",
+            str(out),
+            "--spec",
+            '{"layers":[{"id":"a","scatter":{"size":70,"s":30}}]}',
+        )
+    assert "both 'size' and 's'" in capsys.readouterr().err
+
+
+def test_layer_alpha_shorthand_lifts_into_scatter_and_mesh(tmp_path, plot_fn):
+    grid = write_zarr(make_gridded(), tmp_path / "grid.zarr")
+    pts = write_zarr(make_point_obs(n_time=2), tmp_path / "pts.zarr")
+    out = tmp_path / "overlay_alpha.png"
+    run_skill(
+        plot_fn,
+        "--layer",
+        f"heatmap:{grid}",
+        "--layer",
+        f"scatter:{pts}",
+        "-o",
+        str(out),
+        "--spec",
+        '{"layers":[{"id":"a","alpha":0.3},{"id":"b","alpha":0.6}]}',
+    )
+    assert Path(out).exists()
+    assert out.stat().st_size > 0
+
+
 def test_layer_heatmap_and_outline(tmp_path, plot_fn):
     src = write_zarr(make_gridded(), tmp_path / "in.zarr")
     geo = _write_box_geojson(tmp_path / "box.geojson")
@@ -1322,6 +1422,26 @@ def test_layer_heatmap_and_outline(tmp_path, plot_fn):
     run_skill(plot_fn, "--layer", f"heatmap:{src}", "--layer", f"outline:{geo}", "-o", str(out))
     assert Path(out).exists()
     assert out.stat().st_size > 0
+
+
+def test_layer_outline_line_style(tmp_path, plot_fn):
+    src = write_zarr(make_gridded(), tmp_path / "in.zarr")
+    geo = _write_box_geojson(tmp_path / "box.geojson")
+    default = tmp_path / "default.png"
+    styled = tmp_path / "styled.png"
+    run_skill(plot_fn, "--layer", f"heatmap:{src}", "--layer", f"outline:{geo}", "-o", str(default))
+    run_skill(
+        plot_fn,
+        "--layer",
+        f"heatmap:{src}",
+        "--layer",
+        f"outline:{geo}",
+        "-o",
+        str(styled),
+        "--spec",
+        '{"layers":[{"id":"b","line":{"color":"red","linewidth":4}}]}',
+    )
+    assert default.read_bytes() != styled.read_bytes()
 
 
 def test_layer_heatmap_scatter_outline(tmp_path, plot_fn):
@@ -1876,3 +1996,232 @@ def test_layer_patch_by_id_dump_spec(tmp_path, plot_fn):
     assert spec["layers"][0]["vmin"] == -1.5
     assert spec["layers"][1]["id"] == "b"
     assert spec["layers"][1].get("colormap") is None
+
+
+@pytest.mark.parametrize(
+    ("skill", "module", "fn"),
+    [
+        ("plot", "plot", "plot"),
+        ("plot-timeseries", "plot_timeseries", "plot_timeseries"),
+        ("plot-mediogram", "plot_mediogram", "plot_mediogram"),
+        ("plot-verify", "plot_verify", "plot_verify"),
+    ],
+)
+def test_help_carries_the_spec_reference(skill, module, fn):
+    """--help, not --dump-spec, is where every spec feature is listed."""
+    text = getattr(load_skill(skill, module), fn).parser.format_help()
+    assert "PLOT SPEC REFERENCE" in text
+    for needle in ("annotations[]", "yref", "axes fraction", "layout.facet", "wspace", "RECIPES"):
+        assert needle in text
+    assert ("KINDS (traces[0].kind)" in text) == (skill == "plot")
+    assert "skill version:" in text
+
+
+@pytest.mark.parametrize("recipe", RECIPES, ids=[label for label, _ in RECIPES])
+def test_help_recipes_render(tmp_path, plot_fn, recipe):
+    """Every recipe printed by --help draws without error."""
+    label, value = recipe
+    src = write_zarr(make_gridded(n_time=3), tmp_path / "in.zarr")
+    out = tmp_path / "out.png"
+    if value.startswith("--layer"):
+        geo = _write_box_geojson(tmp_path / "region.geojson")
+        spec_json = value.split("--spec ", 1)[1].strip("'").replace("REGION.geojson", str(geo))
+        args = ["--layer", f"heatmap:{src}", "--layer", f"outline:{geo}", "--spec", spec_json]
+    else:
+        args = ["-i", str(src), "--spec", value]
+    run_skill(plot_fn, *args, "-o", str(out))
+    assert out.stat().st_size > 0, label
+
+
+def test_annotation_axes_fraction_lands_on_the_panel():
+    import matplotlib.pyplot as plt
+
+    for ann in (
+        {"text": "a", "x": 0.5, "y": 0.03, "xref": "axes fraction", "yref": "axes fraction"},
+        {"text": "b", "x": 0.5, "y": 0.03, "xycoords": "axes fraction"},
+        {"text": "c", "x": 0.5, "y": 0.03, "xref": "paper"},
+    ):
+        fig, ax = plt.subplots()
+        ax.set_xlim(30, 45)
+        ws_figure.apply_annotation(ax, ann)
+        assert ax.texts[-1].get_transform() is ax.transAxes, ann
+        plt.close(fig)
+
+
+def test_annotation_arrow_uses_axes_fraction_xycoords():
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ws_figure.apply_annotation(
+        ax,
+        {
+            "text": "t",
+            "x": 0.2,
+            "y": 0.2,
+            "xref": "axes fraction",
+            "xytext": [0.8, 0.8],
+            "arrowprops": {"arrowstyle": "->"},
+        },
+    )
+    assert ax.texts[-1].xycoords == "axes fraction"
+    plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    ("ann", "match"),
+    [
+        (
+            {"text": "t", "x": 0, "y": 0, "xref": "paper", "yref": "data"},
+            "mixes coordinate systems",
+        ),
+        ({"text": "t", "x": 0, "y": 0, "xref": "inches"}, "not a known coordinate system"),
+        (
+            {"text": "t", "x": 0, "y": 0, "colour": "red"},
+            r"unknown key\(s\) \['colour'\]; allowed:",
+        ),
+    ],
+)
+def test_annotation_spec_errors_are_caught_at_parse(ann, match):
+    from weather_skills_core import UsageError
+
+    with pytest.raises(UsageError, match=match):
+        ws_spec.normalize_spec({"annotations": [ann]})
+
+
+def test_geo_overlays_switch_base_map_layers(monkeypatch):
+    """geo.overlays picks which Natural Earth layers load; admin1 can be forced on."""
+    loaded = []
+
+    def fake_clip(resolution, category, name, clip):
+        loaded.append(name)
+        return []
+
+    monkeypatch.setattr(plot_maps, "clip_ne_geoms", fake_clip)
+    kenya = [33.5, 42.0, -5.0, 5.0]
+    wide = [0.0, 60.0, -30.0, 30.0]
+
+    plot_maps.load_geo_overlays(kenya)
+    assert set(loaded) == {
+        "admin_1_states_provinces",
+        "rivers_lake_centerlines",
+        "lakes",
+        "admin_0_boundary_lines_land",
+        "coastline",
+    }
+    loaded.clear()
+    plot_maps.load_geo_overlays(kenya, {"rivers": False, "admin1": False})
+    assert "rivers_lake_centerlines" not in loaded
+    assert "admin_1_states_provinces" not in loaded
+    loaded.clear()
+    plot_maps.load_geo_overlays(wide, {"admin1": True})
+    assert "admin_1_states_provinces" in loaded
+    loaded.clear()
+    assert plot_maps.load_geo_overlays(kenya, False) == []
+    assert loaded == []
+
+
+@pytest.mark.parametrize(
+    ("overlays", "match"),
+    [
+        ({"river": False}, "geo.overlays.river is not a known overlay"),
+        ({"rivers": "no"}, "must be true or false"),
+        ("none", "must be true, false, or an object"),
+    ],
+)
+def test_geo_overlays_bad_values_are_errors(overlays, match):
+    from weather_skills_core import UsageError
+
+    with pytest.raises(UsageError, match=match):
+        ws_spec.normalize_spec({"geo": {"overlays": overlays}})
+
+
+@pytest.mark.parametrize(
+    ("shape", "match"),
+    [
+        ({"type": "rect", "x0": 0, "x1": 1, "y0": 0, "y1": 1, "colour": "r"}, r"\['colour'\]"),
+        ({"type": "circle", "x": 0, "y": 0, "radius": 1, "color": "r"}, r"\(circle\).*\['color'\]"),
+        ({"type": "hline", "y": 0, "xref": "paper"}, "Shapes are drawn in data coordinates"),
+        ({"type": "triangle"}, "type 'triangle' is unknown"),
+    ],
+)
+def test_shape_unknown_keys_are_errors(shape, match):
+    from weather_skills_core import UsageError
+
+    with pytest.raises(UsageError, match=match):
+        ws_spec.normalize_spec({"shapes": [shape]})
+
+
+def test_every_shape_type_is_in_help():
+    from weather_skills_plotting.reference import _SHAPES
+
+    assert set(_SHAPES) == set(ws_figure.SHAPE_TYPES)
+
+
+def _units_map(ds, colormap=None):
+    """Compile a one-panel heatmap; return (figure, plotted array, colorbar label, norm)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    spec = {
+        "version": 2,
+        "inputs": [{"id": "a", "variable": next(iter(ds.data_vars))}],
+        "traces": [{"kind": "heatmap", "input": "a"}],
+        "layout": {"facet": {}},
+        "geo": {},
+    }
+    if colormap:
+        spec["theme"] = {"colormap": colormap}
+    fig, _drawn = plot_maps.compile_map_figure(spec, {"a": ds}, fontsize=12)
+    cbar = next(ax for ax in fig.axes if ax.get_label() == "<colorbar>")
+    label = cbar.get_xlabel() or cbar.get_ylabel()
+    mesh = next(
+        c for ax in fig.axes if ax is not cbar for c in ax.collections if c.get_array() is not None
+    )
+    return fig, np.asarray(mesh.get_array(), dtype=float), label, mesh.norm
+
+
+def test_map_keeps_requested_inches_per_day_and_palette_follows():
+    """Nakuru: a rate converted to in/day is drawn in in/day, not back in mm/day."""
+    import matplotlib.pyplot as plt
+
+    ds = make_gridded(n_time=1, fill=0.5)
+    ds["precip"].attrs["units"] = "inch day-1"
+    fig, values, label, norm = _units_map(ds)
+    assert np.nanmax(values) == pytest.approx(0.5)
+    assert label.endswith("[in/day]")
+    # The nested mm classes are expressed in inches, not left in mm.
+    mm_fig, _mm_values, _mm_label, mm_norm = _units_map(make_gridded(n_time=1, fill=12.7))
+    expected = [float(f"{b / 25.4:.3g}") for b in mm_norm.boundaries]
+    assert list(norm.boundaries) == pytest.approx(expected)
+    plt.close(fig)
+    plt.close(mm_fig)
+
+
+def test_map_keeps_requested_fahrenheit():
+    import matplotlib.pyplot as plt
+
+    ds = make_gridded(n_time=1, name="t2m", fill=77.0)
+    ds["t2m"].attrs.update(units="degree_Fahrenheit", standard_name="air_temperature")
+    for field in (ds, ds.pint.quantify()):  # the CLI hands the renderer quantified data
+        fig, values, label, _norm = _units_map(field, colormap="viridis")
+        assert np.nanmax(values) == pytest.approx(77.0)
+        assert label.endswith("[°F]")
+        plt.close(fig)
+
+
+def test_map_mm_per_day_and_kelvin_still_standardised():
+    import matplotlib.pyplot as plt
+
+    fig, values, label, norm = _units_map(make_gridded(n_time=1, fill=12.7))
+    assert np.nanmax(values) == pytest.approx(12.7)
+    assert label.endswith("[mm/day]")
+    from weather_skills_plotting.theme import precip_nested_palette
+
+    assert list(norm.boundaries) == pytest.approx(precip_nested_palette("ppt_week")["bounds"])
+    plt.close(fig)
+    ds = make_gridded(n_time=1, name="t2m", fill=300.0)
+    ds["t2m"].attrs.update(units="K", standard_name="air_temperature")
+    fig, values, label, _norm = _units_map(ds, colormap="viridis")
+    assert np.nanmax(values) == pytest.approx(300.0 - 273.15)
+    assert label.endswith("[°C]")
+    plt.close(fig)

@@ -29,13 +29,13 @@ flowchart LR
   open files itself.
 - **Layout** is JSON with **one home per knob** (see the table below). An
   unknown key is an error listing every valid key at that level, never a
-  silent no-op — there is no back-compat redirect table, so run
-  `--dump-spec -` on your inputs with no `--spec` to see the current schema
-  instead of guessing a key. A default run writes only the PNG. The skill
+  silent no-op — there is no back-compat redirect table, so run `--help`
+  (which ends with the full spec reference, generated from the validator's
+  key lists) instead of guessing a key. A default run writes only the PNG. The skill
   builds an internal spec from
   the opened files, then deep-merges `--spec` onto it. User values win.
   `--dump-spec` writes that merged spec and skips the PNG (`-o` is not
-  required). There is no `--patch` and no `*.plot.json` sidecar.
+  required) — use it to get the current spec to modify, not to learn keys. There is no `--patch` and no `*.plot.json` sidecar.
 - **Files on the command line, parameters in `--spec`.** `-i`, `--layer
   KIND:PATH`, `--x`, and `--y` name the datasets. Kind, variable, titles,
   colormap, bbox, and the rest of the old flag set are spec keys. Passing
@@ -48,7 +48,7 @@ flowchart LR
   figure. A heatmap kind and `--layer heatmap:<path>` render the same
   picture. Several heatmap traces are separate panels, one per dataset,
   each on that Zarr's lat/lon. `--layer` still stacks every input on one
-  axes. Overlays (coastlines, borders, filled lakes, admin-1) pick a
+  axes. Overlays (coastlines, borders, filled lakes, rivers, admin-1) pick a
   Natural Earth resolution from the map span and skip a layer with a
   warning if it cannot be fetched.
 - **Recipes stay Python** (verify grid, mediogram boxes). There is no
@@ -108,7 +108,7 @@ average `number` first; use `summarize-dim --dim number --method mean` on
 Every knob has exactly one home. `normalize_spec` in `plot/spec.py` validates
 against this table and rejects anything else, listing the valid keys at that
 level. There is no legacy-key redirect table — an old or misplaced key is
-just "not a known key," so use this table (or `--dump-spec -`) as the
+just "not a known key," so use this table (or `--help`) as the
 reference. Spec version is `2`.
 
 | Where | Keys |
@@ -140,7 +140,7 @@ Where a knob lives:
 A dumped spec from an older version of this tool (`style`, `traces[].type`,
 `traces[].style`, …) is rejected outright, listing the current valid keys.
 There is no back-compat rewrite or redirect table — re-check this table
-(or run `--dump-spec -` on your inputs) rather than reusing an old dump.
+(or run `--help`) rather than reusing an old dump.
 
 Key details:
 

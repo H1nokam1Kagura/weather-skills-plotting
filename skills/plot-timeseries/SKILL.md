@@ -1,6 +1,6 @@
 ---
 name: plot-timeseries
-description: Render a PNG with traces overlaid on a shared time axis, as lines or bars. Name files with repeatable -i. Set parameters in --spec: traces[].reduce, traces[].along (e.g. number for ensemble spaghetti), traces[].mark, traces[].line, layout.facet.per_trace, layout.bar_mode, title, theme.fontsize (default 16). --dump-spec prints the merged spec. Leftover non-time dims must be reduced or fanned out; nothing is averaged silently. For precipitation, run aggregate-temporal then convert-to-totals first.
+description: "Render a PNG with traces overlaid on a shared time axis, as lines or bars. Name files with repeatable -i. Set parameters in --spec: traces[].reduce, traces[].along (e.g. number for ensemble spaghetti), traces[].mark, traces[].line, layout.facet.per_trace, layout.bar_mode, title, theme.fontsize (default 16). --dump-spec prints the merged spec. Leftover non-time dims must be reduced or fanned out; nothing is averaged silently. For precipitation, run aggregate-temporal then convert-to-totals first."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/plot_timeseries.py *)
@@ -46,10 +46,10 @@ For a single-input quick-look, use the `plot` skill with
 Every drawing choice besides `-i`/`-o` is a JSON key under `--spec` (see
 **Parameters** below); an unknown or misplaced key is a hard error listing
 every valid key at that level, not a silent no-op. If you don't already
-know the shape of `--spec`, run `--dump-spec -` with your `-i` files and no
-`--spec` at all to see the whole resolved schema in one call, rather than
-guessing keys one at a time — or read the full key reference in prose at
-[`docs/plotting.md`](../../docs/plotting.md). And render once and look at
+know the shape of `--spec`, run `--help`: after the flags it prints the plot
+spec reference (every section and key, with recipes), rather than guessing
+keys one at a time. To modify a figure you already drew, `--dump-spec -`
+with the same files prints its current spec to edit and pass back. And render once and look at
 the PNG before trying another variation — the `plot hash` printed after a
 render only tells you the pixels changed, never what changed or how it
 looks.
@@ -84,7 +84,7 @@ uv run ${CLAUDE_SKILL_DIR}/scripts/plot_timeseries.py -i <a.zarr> --dump-spec -
 - `--input`, `-i` — input Zarr; repeat the flag for each series. Order is the legend order. Optional when `--spec` lists input paths.
 - `--output`, `-o` — PNG path.
 - `--spec` — JSON object or path, always deep-merged onto the spec built from the opened files. Your values win. `inputs[]` merges by id, `traces[]` by `input` (else id). A `patch` key inside the object is rejected.
-- `--dump-spec` — write the merged spec as JSON and skip the PNG. Bare `--dump-spec` or `-` prints to stdout. Run it with just `-i` and no `--spec` to see the full default schema before writing one.
+- `--dump-spec` — write the merged spec as JSON and skip the PNG. Bare `--dump-spec` or `-` prints to stdout. Use it to get the current spec to modify; for what keys exist, use `--help`.
 
 ### Parameters (`--spec`)
 
@@ -116,6 +116,12 @@ carries a `units` attribute. Units are a short display form (`mm/day`,
 `°C`), not the on-disk CF string.
 
 ### Input units
+
+Inputs already in a display unit are drawn as they are: a precip rate in
+`in/day` (or an `in` total) and an air temperature in `°F` keep those units, and
+the label follows. Raw model units (`K`, `kg m-2 s-1`, `m`, `Pa`) are converted
+to `°C`, `mm/day`, `mm`, `hPa`. When the inputs would keep different units, all
+of them are converted to the standard units so they share one axis.
 
 In overlay mode, all traces share one y-axis whose label takes the units of the
 first input. When the overlaid inputs carry the plotted variable in differing

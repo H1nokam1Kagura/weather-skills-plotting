@@ -2,7 +2,7 @@
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
 #   "weather-skills-plotting",
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@dev",
+#   "weather-skills-core @ git+https://github.com/gatesfoundation/agentic-weather-skills@1560a0a852a73a638795fb0b20d98155965f884e",
 #   "cf-xarray",
 #   "cftime",
 #   "numpy",
@@ -19,18 +19,18 @@
 from weather_skills_core import DataError, Dataset, UsageError, weather_skill
 from weather_skills_core.cf import cf_dim, resolve_input_variable
 from weather_skills_core.units import (
-    precip_for_display,
-    to_standard_units,
     variable_label_for_display,
 )
 
 from weather_skills_plotting import export
 from weather_skills_plotting.charts import compile_mediogram
+from weather_skills_plotting.display_units import display_units_agree, prepare_for_display
 from weather_skills_plotting.figure import (
     DEFAULT_FONTSIZE,
     parse_figsize,  # noqa: F401 — tests call this via the skill module
     resolve_axis_label,
 )
+from weather_skills_plotting.reference import install_spec_help
 from weather_skills_plotting.spec import (
     DUMP_SPEC_ARGUMENT_HELP,
     SPEC_ARGUMENT_HELP,
@@ -127,8 +127,11 @@ def plot_mediogram(
             f"variable {mc_variable!r} missing from mclimate. Available: {list(ds_mc.data_vars)}"
         )
 
-    ds_fc = precip_for_display(to_standard_units(ds_fc, variables=[fc_variable]), fc_variable)
-    ds_mc = precip_for_display(to_standard_units(ds_mc, variables=[mc_variable]), mc_variable)
+    # Forecast and climate are drawn on one axis: keep their incoming display
+    # units only when both agree, else standardise both.
+    keep_units = display_units_agree([(ds_fc, fc_variable), (ds_mc, mc_variable)])
+    ds_fc = prepare_for_display(ds_fc, fc_variable, keep=keep_units)
+    ds_mc = prepare_for_display(ds_mc, mc_variable, keep=keep_units)
     da_fc = ds_fc[fc_variable]
     da_mc = ds_mc[mc_variable]
 
@@ -210,6 +213,8 @@ def plot_mediogram(
         spec=spec_data,
     )
 
+
+install_spec_help(plot_mediogram, kinds=False)
 
 if __name__ == "__main__":
     plot_mediogram()

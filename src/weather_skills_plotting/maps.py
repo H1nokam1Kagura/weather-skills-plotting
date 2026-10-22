@@ -25,13 +25,13 @@ from weather_skills_core.standard_utils import (
 from weather_skills_core.units import (
     DATA_INTERVAL_ATTR,
     parse_aggregation_period,
-    precip_for_display,
     to_standard_units,
     units_equal,
     variable_label_for_display,
     variable_units,
 )
 
+from weather_skills_plotting.display_units import display_units_agree, prepare_for_display
 from weather_skills_plotting.figure import (
     add_shared_colorbar,
     apply_style_then_rc,
@@ -52,7 +52,9 @@ from weather_skills_plotting.figure import (
     wrap_axes_title,
 )
 from weather_skills_plotting.spec import (
+    SPEC_HELP_HINT,
     apply_index,
+    apply_layer_alpha,
     fold_layer_options,
     panel_shape,
     parse_index,
@@ -80,6 +82,9 @@ MIDRES_MAX_SPAN_DEG = 90.0
 # (#50a5f5 / #1e6eeb) look like rainfall; this grey-blue does not.
 LAKE_FACECOLOR = "#708090"
 ADMIN1_STYLE = {"facecolor": "none", "edgecolor": "0.45", "linewidth": 0.4, "zorder": 3}
+# Same slate as lakes, thinner than admin-1, and drawn under the lake fill so
+# centerlines through Lake Victoria etc. are hidden.
+RIVERS_STYLE = {"facecolor": "none", "edgecolor": LAKE_FACECOLOR, "linewidth": 0.35, "zorder": 3.4}
 LAKES_STYLE = {
     "facecolor": LAKE_FACECOLOR,
     "edgecolor": LAKE_FACECOLOR,
@@ -181,14 +186,48 @@ def _bundled_country_geoms(clip_geom):
     return [shapely.boundary(g) for g in geoms if g is not None and not g.is_empty]
 
 
-def load_geo_overlays(extent):
-    """Scale-appropriate coastline / border / filled-lake / admin-1 overlays.
+# Base-map layers ``geo.overlays`` can switch on or off.
+OVERLAY_NAMES = ("coastline", "borders", "lakes", "rivers", "admin1")
+
+
+def overlay_choice(value, loc="geo.overlays"):
+    """``{name: bool}`` from ``geo.overlays``; a missing name keeps its default.
+
+    ``true`` / unset draws the defaults, ``false`` draws none, and an object
+    such as ``{"rivers": false}`` switches single layers. ``admin1: true``
+    draws admin-1 even on views wider than it normally appears.
+    """
+    if value is None or value is True:
+        return {}
+    if value is False:
+        return dict.fromkeys(OVERLAY_NAMES, False)
+    if not isinstance(value, dict):
+        raise UsageError(
+            f"{loc} must be true, false, or an object like "
+            f'{{"rivers": false}} with keys {", ".join(OVERLAY_NAMES)}'
+        )
+    for key, flag in value.items():
+        if key not in OVERLAY_NAMES:
+            raise UsageError(
+                f"{loc}.{key} is not a known overlay; allowed: {', '.join(OVERLAY_NAMES)}"
+            )
+        if not isinstance(flag, bool):
+            raise UsageError(f"{loc}.{key} must be true or false")
+    return dict(value)
+
+
+def load_geo_overlays(extent, overlays=None):
+    """Scale-appropriate coastline / border / filled-lake / river / admin-1 overlays.
 
     Returns a list of ``(geometries, matplotlib style)`` layers, each clipped to
     the map extent so a country-scale view does not draw the rest of the world.
     Download or clip failures warn and skip that layer — the map still renders.
+    ``overlays`` is ``geo.overlays`` (see ``overlay_choice``).
     """
     if extent is None:
+        return []
+    choice = overlay_choice(overlays)
+    if not any(choice.get(name, True) for name in OVERLAY_NAMES):
         return []
     spec = boundary_layers(extent)
     try:
@@ -214,6 +253,8 @@ def load_geo_overlays(extent):
     try:
         import cartopy.io.shapereader  # noqa: F401
     except ImportError:
+        if not choice.get("borders", True):
+            return []
         try:
             geoms = _bundled_country_geoms(clip)
         except Exception as exc:  # noqa: BLE001
@@ -223,11 +264,16 @@ def load_geo_overlays(extent):
             geoms = unwrap_geoms(geoms, lon_min)
         return [(geoms, BORDERS_STYLE)] if geoms else []
 
-    if spec["admin1"]:
+    if choice.get("admin1", spec["admin1"]):
         add("cultural", "admin_1_states_provinces", ADMIN1_STYLE, resolution="10m")
-    add("physical", "lakes", LAKES_STYLE)
-    add("cultural", "admin_0_boundary_lines_land", BORDERS_STYLE)
-    add("physical", "coastline", COAST_STYLE)
+    if choice.get("rivers", True):
+        add("physical", "rivers_lake_centerlines", RIVERS_STYLE)
+    if choice.get("lakes", True):
+        add("physical", "lakes", LAKES_STYLE)
+    if choice.get("borders", True):
+        add("cultural", "admin_0_boundary_lines_land", BORDERS_STYLE)
+    if choice.get("coastline", True):
+        add("physical", "coastline", COAST_STYLE)
     return layers
 
 
@@ -1369,12 +1415,25 @@ def _extent_from_points(da):
     ]
 
 
-def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=None):
+def _layers_keep_units(layers) -> bool:
+    """Keep the incoming display units only when every colour-scaled layer agrees.
+
+    Mixed units (one layer in °F, another in K) fall back to standard units for
+    all of them, so they can still share one colour scale.
+    """
+    pairs = []
+    for spec in layers:
+        if spec.kind in ("heatmap", "scatter"):
+            _ensure_layer_dataset(spec)
+            pairs.append((spec.ds, _layer_variable(spec.ds, spec)))
+    return display_units_agree(pairs)
+
+
+def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=None, keep_units=True):
     _ensure_layer_dataset(spec)
     ds = spec.ds
     variable = _layer_variable(ds, spec)
-    ds = to_standard_units(ds, variables=[variable])
-    ds = precip_for_display(ds, variable)
+    ds = prepare_for_display(ds, variable, keep=keep_units)
     da = ds[variable]
     overrides = _layer_overrides(spec, spec.options.get("index"))
     da, lat_dim, lon_dim, extent_vals, wrap_lon, native_step_dim, native_steps = (
@@ -1434,7 +1493,7 @@ def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=Non
     }
 
 
-def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None):
+def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None, keep_units=True):
     _ensure_layer_dataset(spec)
     ds = spec.ds
     point_dim = _point_dim(ds)
@@ -1444,8 +1503,7 @@ def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None):
             f"(got dims {list(ds.dims)})"
         )
     variable = _layer_variable(ds, spec)
-    ds = to_standard_units(ds, variables=[variable])
-    ds = precip_for_display(ds, variable)
+    ds = prepare_for_display(ds, variable, keep=keep_units)
     da = ds[variable]
     overrides = _layer_overrides(spec, spec.options.get("index"))
     panel_dim = step_dim(da)
@@ -1485,6 +1543,7 @@ def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None):
         "variable": variable,
         "units": variable_units(da),
         "zorder": _KIND_ZORDER["scatter"],
+        "scatter": spec.options.get("scatter"),
     }
 
 
@@ -1573,6 +1632,7 @@ def _prep_outline_layer(spec):
         "kind": "outline",
         "spec": spec,
         "polygon": polygon_from_geojson(spec.path, flag="--layer outline"),
+        "style": outline_style(spec.options.get("line")),
         "panel_dim": None,
         "zorder": _KIND_ZORDER["outline"],
     }
@@ -1687,16 +1747,19 @@ def _draw_scatter_on_ax(ax, prepared, transform):
     return ax.scatter(
         da[lon_name].values,
         da[lat_name].values,
-        c=da.values,
-        cmap=prepared["cmap"],
-        norm=prepared["norm"],
-        vmin=prepared["vmin"],
-        vmax=prepared["vmax"],
-        s=30,
-        transform=transform,
-        zorder=prepared["zorder"],
-        edgecolors="k",
-        linewidths=0.3,
+        **{
+            "c": da.values,
+            "cmap": prepared["cmap"],
+            "norm": prepared["norm"],
+            "vmin": prepared["vmin"],
+            "vmax": prepared["vmax"],
+            "s": 30,
+            "transform": transform,
+            "zorder": prepared["zorder"],
+            "edgecolors": "k",
+            "linewidths": 0.3,
+            **scatter_kwargs({"scatter": prepared.get("scatter")}),
+        },
     )
 
 
@@ -1751,15 +1814,36 @@ def _draw_quiver_on_ax(ax, prepared, transform, scale, step, mpl_spec=None):
     return mesh, quiv
 
 
+# ``layers[].line`` keys an outline honors, mapped to the polygon-patch kwarg.
+_OUTLINE_LINE_KWARGS = {
+    "color": "edgecolor",
+    "c": "edgecolor",
+    "linewidth": "linewidth",
+    "lw": "linewidth",
+    "linestyle": "linestyle",
+    "ls": "linestyle",
+    "alpha": "alpha",
+    "zorder": "zorder",
+}
+
+
+def outline_style(line: dict | None, *, loc: str = "layers[].line") -> dict:
+    """Patch kwargs for an outline layer: black 1.2 pt unless ``line`` overrides."""
+    style = {"edgecolor": "black", "linewidth": 1.2}
+    unsupported = sorted(k for k in (line or {}) if k not in _OUTLINE_LINE_KWARGS)
+    if unsupported:
+        raise UsageError(
+            f"{loc} key(s) {unsupported} do not apply to an outline; "
+            f"allowed: {', '.join(sorted(_OUTLINE_LINE_KWARGS))}"
+        )
+    for key, value in (line or {}).items():
+        style[_OUTLINE_LINE_KWARGS[key]] = value
+    return style
+
+
 def _draw_outline_on_ax(ax, prepared, crs):
-    ax.add_geometries(
-        [prepared["polygon"]],
-        crs,
-        facecolor="none",
-        edgecolor="black",
-        linewidth=1.2,
-        zorder=prepared["zorder"],
-    )
+    style = {"zorder": prepared["zorder"], **prepared["style"]}
+    ax.add_geometries([prepared["polygon"]], crs, facecolor="none", **style)
 
 
 def _limit_token(value):
@@ -2003,14 +2087,19 @@ def _plot_layers(
 
     region_polygon = _combined_mask_polygon(mask_geojson, layers)
     extent_vals = parse_extent(extent)
+    keep_units = _layers_keep_units(layers)
     prepared = []
     for i, spec in enumerate(layers):
         if spec.kind == "mask":
             continue
         if spec.kind == "heatmap":
-            item = _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, registry=registry)
+            item = _prep_heatmap_layer(
+                spec, bbox_nwse, region_polygon, extent, registry=registry, keep_units=keep_units
+            )
         elif spec.kind == "scatter":
-            item = _prep_scatter_layer(spec, bbox_nwse, region_polygon, registry=registry)
+            item = _prep_scatter_layer(
+                spec, bbox_nwse, region_polygon, registry=registry, keep_units=keep_units
+            )
         elif spec.kind == "quiver":
             item = _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent)
         elif spec.kind == "outline":
@@ -2050,7 +2139,7 @@ def _plot_layers(
             raise UsageError(
                 f"each {where} has to be one map; "
                 f"{p['spec'].kind}:{p['spec'].path} still has {field.sizes[dim]} "
-                f"values along {dim!r}"
+                f"values along {dim!r}. {SPEC_HELP_HINT}"
             )
         steps = list(range(len(groups)))
         sdim = None
@@ -2166,7 +2255,7 @@ def _plot_layers(
             None,
         ),
     }
-    overlays = load_geo_overlays(extent_vals)
+    overlays = load_geo_overlays(extent_vals, ((mpl_spec or {}).get("geo") or {}).get("overlays"))
     cities_map = parse_cities(cities)
     boxes = draw_boxes or []
     transform = ccrs.PlateCarree()
@@ -2347,7 +2436,12 @@ def _contour_levels(vmin, vmax, n=10, norm=None):
 
 # A single-input map kind is a one-layer figure: `--kind heatmap` and
 # `--layer heatmap:x.zarr` take the same path so they cannot drift apart.
-KIND_TO_LAYER = {"heatmap": "heatmap", "contour": "heatmap", "quiver": "quiver"}
+KIND_TO_LAYER = {
+    "heatmap": "heatmap",
+    "contour": "heatmap",
+    "quiver": "quiver",
+    "scatter": "scatter",
+}
 MAP_STYLES = frozenset(KIND_TO_LAYER) | {"layer"}
 
 
@@ -2394,12 +2488,12 @@ def _inherit_layer_options(
 
 
 def _layer_for_trace(trace, spec, inputs, by_id, dataset_for, panel=None):
-    """One ``LayerSpec`` for a heatmap, contour, or quiver trace.
+    """One ``LayerSpec`` for a heatmap, contour, quiver, or scatter trace.
 
-    ``panel`` is the fixed grid cell this trace occupies when several
-    heatmap/contour/quiver traces share one figure (side by side, each on
-    its own lat/lon). Left ``None`` for a lone trace, whose own leftover
-    time/step axis instead auto-tiles into panels (see ``_panel_groups``).
+    ``panel`` is the fixed grid cell this trace occupies when several such
+    traces share one figure (side by side, each on its own lat/lon). Left
+    ``None`` for a lone trace, whose own leftover time/step axis instead
+    auto-tiles into panels (see ``_panel_groups``).
     """
     style = (trace or {}).get("kind") or "heatmap"
     if style not in KIND_TO_LAYER:
@@ -2422,6 +2516,11 @@ def _layer_for_trace(trace, spec, inputs, by_id, dataset_for, panel=None):
             options["contour"] = trace["contour"]
     if trace.get("mesh") is not None:
         options["mesh"] = trace["mesh"]
+    if trace.get("scatter") is not None:
+        options["scatter"] = trace["scatter"]
+    if trace.get("alpha") is not None:
+        options["alpha"] = trace["alpha"]
+    options = apply_layer_alpha(options, style)
     layer = LayerSpec(
         KIND_TO_LAYER[style],
         spec_input.get("path") or "",
@@ -2520,8 +2619,8 @@ def layers_from_spec(spec: dict, datasets: dict) -> list:
     """Build the ``LayerSpec`` list a map spec describes.
 
     An explicit ``layers`` list is stacked on one axes. Otherwise each
-    heatmap, contour, or quiver trace is its own layer; several of those
-    are drawn as separate panels.
+    heatmap, contour, quiver, or scatter trace is its own layer; several of
+    those are drawn as separate panels.
     """
     inputs = [i for i in (spec.get("inputs") or []) if isinstance(i, dict)]
     by_id = {str(i.get("id")): i for i in inputs}
@@ -2799,7 +2898,11 @@ def compile_grid(
     trace = trace_at(spec)
     nrows = len(cells)
     ncols = max((len(row) for row in cells), default=1)
-    geo_layers = load_geo_overlays(extent) if overlays else []
+    geo_layers = (
+        load_geo_overlays(extent, ((spec or {}).get("geo") or {}).get("overlays"))
+        if overlays
+        else []
+    )
     facet = ((spec or {}).get("layout") or {}).get("facet") or {}
     fig, axes, _spacing = _panel_grid(
         nrows,

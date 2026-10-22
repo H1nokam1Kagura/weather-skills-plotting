@@ -2155,3 +2155,73 @@ def test_every_shape_type_is_in_help():
     from weather_skills_plotting.reference import _SHAPES
 
     assert set(_SHAPES) == set(ws_figure.SHAPE_TYPES)
+
+
+def _units_map(ds, colormap=None):
+    """Compile a one-panel heatmap; return (figure, plotted array, colorbar label, norm)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    spec = {
+        "version": 2,
+        "inputs": [{"id": "a", "variable": next(iter(ds.data_vars))}],
+        "traces": [{"kind": "heatmap", "input": "a"}],
+        "layout": {"facet": {}},
+        "geo": {},
+    }
+    if colormap:
+        spec["theme"] = {"colormap": colormap}
+    fig, _drawn = plot_maps.compile_map_figure(spec, {"a": ds}, fontsize=12)
+    cbar = next(ax for ax in fig.axes if ax.get_label() == "<colorbar>")
+    label = cbar.get_xlabel() or cbar.get_ylabel()
+    mesh = next(
+        c for ax in fig.axes if ax is not cbar for c in ax.collections if c.get_array() is not None
+    )
+    return fig, np.asarray(mesh.get_array(), dtype=float), label, mesh.norm
+
+
+def test_map_keeps_requested_inches_per_day_and_palette_follows():
+    """Nakuru: a rate converted to in/day is drawn in in/day, not back in mm/day."""
+    import matplotlib.pyplot as plt
+
+    ds = make_gridded(n_time=1, fill=0.5)
+    ds["precip"].attrs["units"] = "inch day-1"
+    fig, values, label, norm = _units_map(ds)
+    assert np.nanmax(values) == pytest.approx(0.5)
+    assert label.endswith("[in/day]")
+    # The nested mm classes are expressed in inches, not left in mm.
+    mm_fig, _mm_values, _mm_label, mm_norm = _units_map(make_gridded(n_time=1, fill=12.7))
+    expected = [float(f"{b / 25.4:.3g}") for b in mm_norm.boundaries]
+    assert list(norm.boundaries) == pytest.approx(expected)
+    plt.close(fig)
+    plt.close(mm_fig)
+
+
+def test_map_keeps_requested_fahrenheit():
+    import matplotlib.pyplot as plt
+
+    ds = make_gridded(n_time=1, name="t2m", fill=77.0)
+    ds["t2m"].attrs.update(units="degree_Fahrenheit", standard_name="air_temperature")
+    for field in (ds, ds.pint.quantify()):  # the CLI hands the renderer quantified data
+        fig, values, label, _norm = _units_map(field, colormap="viridis")
+        assert np.nanmax(values) == pytest.approx(77.0)
+        assert label.endswith("[°F]")
+        plt.close(fig)
+
+
+def test_map_mm_per_day_and_kelvin_still_standardised():
+    import matplotlib.pyplot as plt
+
+    fig, values, label, norm = _units_map(make_gridded(n_time=1, fill=12.7))
+    assert np.nanmax(values) == pytest.approx(12.7)
+    assert label.endswith("[mm/day]")
+    from weather_skills_plotting.theme import precip_nested_palette
+
+    assert list(norm.boundaries) == pytest.approx(precip_nested_palette("ppt_week")["bounds"])
+    plt.close(fig)
+    ds = make_gridded(n_time=1, name="t2m", fill=300.0)
+    ds["t2m"].attrs.update(units="K", standard_name="air_temperature")
+    fig, values, label, _norm = _units_map(ds, colormap="viridis")
+    assert np.nanmax(values) == pytest.approx(300.0 - 273.15)
+    assert label.endswith("[°C]")
+    plt.close(fig)

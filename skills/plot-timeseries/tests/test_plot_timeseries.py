@@ -864,3 +864,72 @@ def test_per_trace_reduce_overrides_trace0(tmp_path, plot_timeseries, capsys):
     assert "input 2" in err
     assert "traces[].reduce" in err
     assert "longitude" in err
+
+
+def _captured_lines(tmp_path, monkeypatch, *datasets):
+    """Run plot-timeseries on ``datasets``; return the (series, ylabels) it drew."""
+    import numpy as np
+
+    mod = load_skill("plot-timeseries", "plot_timeseries")
+    seen = {}
+    original = mod.compile_lines
+
+    def capture(series, **kwargs):
+        seen["series"] = series
+        seen["ylabels"] = kwargs.get("ylabels")
+        return original(series, **kwargs)
+
+    monkeypatch.setattr(mod, "compile_lines", capture)
+    args = []
+    for idx, ds in enumerate(datasets):
+        args += ["-i", str(write_zarr(ds, tmp_path / f"in{idx}.zarr"))]
+    out = tmp_path / "ts.png"
+    run_skill(
+        mod.plot_timeseries,
+        *args,
+        "-o",
+        str(out),
+        "--spec",
+        '{"traces":[{"reduce":["latitude","longitude"]}]}',
+    )
+    values = [np.asarray(y, dtype=float) for _x, y, _label in seen["series"]]
+    return values, seen["ylabels"]
+
+
+def test_timeseries_keeps_requested_inches_per_day(tmp_path, monkeypatch):
+    ds = make_gridded(fill=0.5)
+    ds["precip"].attrs["units"] = "inch day-1"
+    values, ylabels = _captured_lines(tmp_path, monkeypatch, ds)
+    assert values[0] == pytest.approx(0.5)
+    assert ylabels[0].endswith("[in/day]")
+
+
+def test_timeseries_keeps_requested_fahrenheit(tmp_path, monkeypatch):
+    ds = make_gridded(name="t2m", fill=77.0)
+    ds["t2m"].attrs.update(units="degree_Fahrenheit", standard_name="air_temperature")
+    values, ylabels = _captured_lines(tmp_path, monkeypatch, ds)
+    assert values[0] == pytest.approx(77.0)
+    assert ylabels[0].endswith("[°F]")
+
+
+def test_timeseries_mm_per_day_unchanged_and_kelvin_converted(tmp_path, monkeypatch):
+    values, ylabels = _captured_lines(tmp_path, monkeypatch, make_gridded(fill=12.7))
+    assert values[0] == pytest.approx(12.7)
+    assert ylabels[0].endswith("[mm/day]")
+    ds = make_gridded(name="t2m", fill=300.0)
+    ds["t2m"].attrs.update(units="K", standard_name="air_temperature")
+    values, ylabels = _captured_lines(tmp_path / "k", monkeypatch, ds)
+    assert values[0] == pytest.approx(300.0 - 273.15)
+    assert ylabels[0].endswith("[°C]")
+
+
+def test_timeseries_mixed_display_units_fall_back_to_standard(tmp_path, monkeypatch):
+    """°F against K cannot share an axis as-is: both are drawn in °C, as before."""
+    f = make_gridded(name="t2m", fill=77.0)
+    f["t2m"].attrs.update(units="degree_Fahrenheit", standard_name="air_temperature")
+    k = make_gridded(name="t2m", fill=300.0)
+    k["t2m"].attrs.update(units="K", standard_name="air_temperature")
+    values, ylabels = _captured_lines(tmp_path, monkeypatch, f, k)
+    assert values[0] == pytest.approx(25.0)
+    assert values[1] == pytest.approx(300.0 - 273.15)
+    assert ylabels[0].endswith("[°C]")

@@ -8,9 +8,12 @@ from pathlib import Path
 
 from weather_skills_core.errors import UsageError
 from weather_skills_core.units import (
+    looks_like_precip_total,
     parse_aggregation_period,
     variable_units,
 )
+
+from weather_skills_plotting.display_units import display_levels
 
 DEFAULT_FONTSIZE = 16
 DEFAULT_DPI = 150
@@ -895,6 +898,11 @@ def resolve_colorscale(
         return _scale_with_overrides(scale, parsed, stretch=stretch)
     if da is not None and (is_precip(da) or is_spi(da) or is_precip_poa(da)):
         name, colors, bounds = named_precip_scale(da)
+        if not (is_spi(da) or is_precip_poa(da)):
+            # The nested classes are millimetres (per day for a rate): a field
+            # kept in inches gets the same classes expressed in inches.
+            palette_units = "mm" if looks_like_precip_total(da) else "mm day-1"
+            bounds = display_levels(bounds, da, palette_units)
         return _scale_with_overrides(
             _discrete_scale(name, {"colors": colors, "bounds": bounds}, stretch=stretch),
             parsed,

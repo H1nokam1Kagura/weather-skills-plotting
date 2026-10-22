@@ -13,13 +13,18 @@ from weather_skills_core.standard_utils import (
     polygon_from_geojson,
 )
 from weather_skills_core.units import (
-    precip_for_display,
     to_standard_units,
     units_equal,
     variable_label_for_display,
     variable_units,
 )
 
+from weather_skills_plotting.display_units import (
+    display_units_agree,
+    precip_total_for_display,
+    prepare_for_display,
+    to_display_units,
+)
 from weather_skills_plotting.figure import (
     LEGEND_KEYS,
     apply_date_ticks,
@@ -567,8 +572,7 @@ def _prepare_field(ds, spec_input: dict, geo: dict, style: str):
     variable = spec_input.get("variable") or auto_variable(ds)
     if not variable or variable not in ds:
         raise UsageError(f"no usable variable. Available: {list(ds.data_vars)}")
-    ds = to_standard_units(ds, variables=[variable])
-    ds = precip_for_display(ds, variable)
+    ds = prepare_for_display(ds, variable)
     da = ds[variable]
     overrides = parse_index(spec_input.get("index"))
     bbox_raw = geo.get("bbox")
@@ -819,7 +823,7 @@ def _pair_key(value, pair_on: str):
     return value
 
 
-def _xy_1d(ds, variable, overrides, bbox_nwse, region_polygon, role: str):
+def _xy_1d(ds, variable, overrides, bbox_nwse, region_polygon, role: str, *, keep_units=True):
     """Reduce one input to a 1D series plus pairing-axis values."""
     import numpy as np
 
@@ -829,12 +833,12 @@ def _xy_1d(ds, variable, overrides, bbox_nwse, region_polygon, role: str):
             f"{role} has no usable variable {variable!r}. Available: {list(ds.data_vars)}"
         )
     try:
-        ds = to_standard_units(ds, variables=[variable])
+        ds = to_display_units(ds, [variable], keep=keep_units)
     except UsageError:
         # Totals (mm) or anomalies can still carry a rate/temp standard_name
         # that classify_variable would force into an incompatible target.
         pass
-    ds = precip_for_display(ds, variable)
+    ds = precip_total_for_display(ds, variable)
     da = apply_index(plain(ds[variable]), overrides, list_dims=())
     lat_dim = cf_dim(da, "latitude")
     lon_dim = cf_dim(da, "longitude")
@@ -897,6 +901,19 @@ def _pair_xy(x_axis, x_vals, y_axis, y_vals, pair_on: str):
     return x_out, y_out, shared
 
 
+def _xy_keep_units(x_ds, x_variable, y_ds, y_variable) -> bool:
+    """Keep incoming display units only when --x and --y would keep the same ones."""
+    pairs = []
+    for ds, variable in ((x_ds, x_variable), (y_ds, y_variable)):
+        variable = variable or auto_variable(ds)
+        if variable and variable in ds:
+            pairs.append((ds, variable))
+    try:
+        return display_units_agree(pairs)
+    except UsageError:
+        return True
+
+
 def _plot_xy(
     x_ds,
     y_ds,
@@ -914,8 +931,13 @@ def _plot_xy(
 ):
     """Scatter --x against --y after reducing each input to 1D and pairing samples."""
     region_polygon = polygon_from_geojson(mask_geojson) if mask_geojson else None
-    x_da, x_axis, x_raw = _xy_1d(x_ds, x_variable, overrides, bbox_nwse, region_polygon, "--x")
-    y_da, y_axis, y_raw = _xy_1d(y_ds, y_variable, overrides, bbox_nwse, region_polygon, "--y")
+    keep = _xy_keep_units(x_ds, x_variable, y_ds, y_variable)
+    x_da, x_axis, x_raw = _xy_1d(
+        x_ds, x_variable, overrides, bbox_nwse, region_polygon, "--x", keep_units=keep
+    )
+    y_da, y_axis, y_raw = _xy_1d(
+        y_ds, y_variable, overrides, bbox_nwse, region_polygon, "--y", keep_units=keep
+    )
     x_vals, y_vals, keys = _pair_xy(x_axis, x_raw, y_axis, y_raw, pair_on)
     finite = np.isfinite(x_vals) & np.isfinite(y_vals)
     x_vals, y_vals = x_vals[finite], y_vals[finite]

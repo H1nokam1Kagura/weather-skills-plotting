@@ -30,13 +30,12 @@ from weather_skills_core.display_labels import (
 from weather_skills_core.standard_utils import polygon_from_geojson
 from weather_skills_core.units import (
     format_units_for_display,
-    precip_for_display,
-    to_standard_units,
     units_equal,
     variable_units,
 )
 
 from weather_skills_plotting import export
+from weather_skills_plotting.display_units import display_units_agree, prepare_for_display
 from weather_skills_plotting.figure import (
     DEFAULT_FONTSIZE,
     format_plot_date_range,
@@ -327,8 +326,8 @@ def _pick_variable(ds, inputs, input_id, role):
     return name
 
 
-def _prepare(ds, variable):
-    return precip_for_display(to_standard_units(ds, variables=[variable]), variable)
+def _prepare(ds, variable, *, keep_units=True):
+    return prepare_for_display(ds, variable, keep=keep_units)
 
 
 @weather_skill(
@@ -462,8 +461,14 @@ def plot_verify(
         _pick_variable(fc, inputs_spec, f"forecast{i + 1}", f"--forecast {i + 1}")
         for i, fc in enumerate(forecasts)
     ]
-    obs_ds = _prepare(obs, obs_name)
-    fc_datasets = [_prepare(fc, name) for fc, name in zip(forecasts, fc_names, strict=True)]
+    # Forecast - observed differences need one unit: keep the incoming display
+    # units (in/day, °F) only when every input agrees, else standardise all.
+    keep_units = display_units_agree([(obs, obs_name), *zip(forecasts, fc_names, strict=True)])
+    obs_ds = _prepare(obs, obs_name, keep_units=keep_units)
+    fc_datasets = [
+        _prepare(fc, name, keep_units=keep_units)
+        for fc, name in zip(forecasts, fc_names, strict=True)
+    ]
 
     u_obs = variable_units(obs_ds[obs_name])
     for i, (fc_ds, fc_name) in enumerate(zip(fc_datasets, fc_names, strict=True)):

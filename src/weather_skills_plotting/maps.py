@@ -25,13 +25,13 @@ from weather_skills_core.standard_utils import (
 from weather_skills_core.units import (
     DATA_INTERVAL_ATTR,
     parse_aggregation_period,
-    precip_for_display,
     to_standard_units,
     units_equal,
     variable_label_for_display,
     variable_units,
 )
 
+from weather_skills_plotting.display_units import display_units_agree, prepare_for_display
 from weather_skills_plotting.figure import (
     add_shared_colorbar,
     apply_style_then_rc,
@@ -1415,12 +1415,25 @@ def _extent_from_points(da):
     ]
 
 
-def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=None):
+def _layers_keep_units(layers) -> bool:
+    """Keep the incoming display units only when every colour-scaled layer agrees.
+
+    Mixed units (one layer in °F, another in K) fall back to standard units for
+    all of them, so they can still share one colour scale.
+    """
+    pairs = []
+    for spec in layers:
+        if spec.kind in ("heatmap", "scatter"):
+            _ensure_layer_dataset(spec)
+            pairs.append((spec.ds, _layer_variable(spec.ds, spec)))
+    return display_units_agree(pairs)
+
+
+def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=None, keep_units=True):
     _ensure_layer_dataset(spec)
     ds = spec.ds
     variable = _layer_variable(ds, spec)
-    ds = to_standard_units(ds, variables=[variable])
-    ds = precip_for_display(ds, variable)
+    ds = prepare_for_display(ds, variable, keep=keep_units)
     da = ds[variable]
     overrides = _layer_overrides(spec, spec.options.get("index"))
     da, lat_dim, lon_dim, extent_vals, wrap_lon, native_step_dim, native_steps = (
@@ -1480,7 +1493,7 @@ def _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, *, registry=Non
     }
 
 
-def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None):
+def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None, keep_units=True):
     _ensure_layer_dataset(spec)
     ds = spec.ds
     point_dim = _point_dim(ds)
@@ -1490,8 +1503,7 @@ def _prep_scatter_layer(spec, bbox_nwse, region_polygon, *, registry=None):
             f"(got dims {list(ds.dims)})"
         )
     variable = _layer_variable(ds, spec)
-    ds = to_standard_units(ds, variables=[variable])
-    ds = precip_for_display(ds, variable)
+    ds = prepare_for_display(ds, variable, keep=keep_units)
     da = ds[variable]
     overrides = _layer_overrides(spec, spec.options.get("index"))
     panel_dim = step_dim(da)
@@ -2075,14 +2087,19 @@ def _plot_layers(
 
     region_polygon = _combined_mask_polygon(mask_geojson, layers)
     extent_vals = parse_extent(extent)
+    keep_units = _layers_keep_units(layers)
     prepared = []
     for i, spec in enumerate(layers):
         if spec.kind == "mask":
             continue
         if spec.kind == "heatmap":
-            item = _prep_heatmap_layer(spec, bbox_nwse, region_polygon, extent, registry=registry)
+            item = _prep_heatmap_layer(
+                spec, bbox_nwse, region_polygon, extent, registry=registry, keep_units=keep_units
+            )
         elif spec.kind == "scatter":
-            item = _prep_scatter_layer(spec, bbox_nwse, region_polygon, registry=registry)
+            item = _prep_scatter_layer(
+                spec, bbox_nwse, region_polygon, registry=registry, keep_units=keep_units
+            )
         elif spec.kind == "quiver":
             item = _prep_quiver_layer(spec, bbox_nwse, region_polygon, extent)
         elif spec.kind == "outline":

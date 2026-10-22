@@ -117,6 +117,12 @@ carries a `units` attribute. Units are a short display form (`mm/day`,
 
 ### Input units
 
+Inputs already in a display unit are drawn as they are: a precip rate in
+`in/day` (or an `in` total) and an air temperature in `°F` keep those units, and
+the label follows. Raw model units (`K`, `kg m-2 s-1`, `m`, `Pa`) are converted
+to `°C`, `mm/day`, `mm`, `hPa`. When the inputs would keep different units, all
+of them are converted to the standard units so they share one axis.
+
 In overlay mode, all traces share one y-axis whose label takes the units of the
 first input. When the overlaid inputs carry the plotted variable in differing
 `units`, series in different units are drawn against a single scale and labeled

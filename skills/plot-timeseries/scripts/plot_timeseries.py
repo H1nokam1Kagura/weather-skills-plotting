@@ -26,8 +26,6 @@ from weather_skills_core.cf import resolve_input_variable
 from weather_skills_core.display_labels import dataset_display_label
 from weather_skills_core.standard_utils import pick_time_dim
 from weather_skills_core.units import (
-    precip_for_display,
-    to_standard_units,
     units_equal,
     variable_label_for_display,
     variable_units,
@@ -35,6 +33,7 @@ from weather_skills_core.units import (
 
 from weather_skills_plotting import export
 from weather_skills_plotting.charts import compile_lines, leftover_dims
+from weather_skills_plotting.display_units import display_units_agree, prepare_for_display
 from weather_skills_plotting.figure import (
     DEFAULT_FONTSIZE,
     format_plot_date,
@@ -451,8 +450,11 @@ def plot_timeseries(
                 f"variable {variable!r} missing from input {idx + 1}. "
                 f"Available: {list(dataset.data_vars)}. Set inputs[{idx}].variable."
             )
+    # Keep the units the inputs arrive in (in/day, °F) when they all agree;
+    # otherwise standardise every input so the traces share one scale.
+    keep_units = display_units_agree(list(zip(datasets, variables, strict=True)))
     datasets = [
-        precip_for_display(to_standard_units(dataset, variables=[variable]), variable)
+        prepare_for_display(dataset, variable, keep=keep_units)
         for dataset, variable in zip(datasets, variables, strict=True)
     ]
 
